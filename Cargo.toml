@@ -3,4 +3,18 @@ name = "typst-viewer"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "tv"
+path = "src/main.rs"
+
 [dependencies]
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+font8x8 = "0.3.1"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+pulldown-cmark = { version = "0.13.4", default-features = false }
+softbuffer = "0.4.8"
+typst = "=0.15.1"
+typst-kit = { version = "=0.15.1", features = ["datetime", "embedded-fonts", "emit-diagnostics", "scan-fonts", "system-downloader", "system-files", "watcher"] }
+typst-layout = "=0.15.1"
+typst-render = "=0.15.1"
+winit = "0.30.13"
