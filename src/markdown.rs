@@ -10,7 +10,7 @@ const PAPER_STYLE: &str = r#"
 )
 #set text(font: "New Computer Modern", size: 9.3pt, lang: "en")
 #set par(justify: true, leading: 0.44em, spacing: 1.1em, first-line-indent: 0pt)
-#set heading(numbering: (n) => [#n#h(0.65em)])
+#set heading(numbering: "1.")
 #show heading.where(level: 1): set text(size: 11pt, weight: "bold")
 #show heading.where(level: 1): set block(above: 1.5em, below: 1.5em)
 #show link: set text(fill: black)
@@ -135,6 +135,7 @@ fn text(value: &str) -> String {
 struct Renderer<'a> {
     events: &'a [Event<'a>],
     pos: usize,
+    heading_base: u8,
 }
 
 struct TableCell {
@@ -170,7 +171,19 @@ impl TableCell {
 
 impl<'a> Renderer<'a> {
     fn new(events: &'a [Event<'a>]) -> Self {
-        Self { events, pos: 0 }
+        let heading_base = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Start(Tag::Heading { level, .. }) => Some(*level as u8),
+                _ => None,
+            })
+            .min()
+            .unwrap_or(1);
+        Self {
+            events,
+            pos: 0,
+            heading_base,
+        }
     }
 
     fn render_until(&mut self, end: Option<TagEnd>, inline: bool) -> String {
@@ -192,7 +205,8 @@ impl<'a> Renderer<'a> {
                         }
                         Tag::Heading { level, .. } => {
                             let inner = self.render_until(Some(TagEnd::Heading(*level)), true);
-                            format!("\n#heading(level: {})[{inner}]\n\n", *level as u8)
+                            let depth = (*level as u8).saturating_sub(self.heading_base) + 1;
+                            format!("\n#heading(level: {depth})[{inner}]\n\n")
                         }
                         Tag::BlockQuote(kind) => {
                             let inner = self.render_until(Some(TagEnd::BlockQuote(*kind)), false);

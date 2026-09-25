@@ -221,6 +221,25 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn project_readme_compiles() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let compiler = Compiler::start(Options {
+            input: root.join("README.md"),
+            root,
+            font_path: None,
+            ppi: 144,
+        });
+        match compiler
+            .messages
+            .recv_timeout(Duration::from_secs(15))
+            .unwrap()
+        {
+            CompileMessage::Ready { document, .. } => assert!(!document.pages().is_empty()),
+            _ => panic!("project README did not compile"),
+        }
+    }
+
+    #[test]
     fn markdown_edits_recompile() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
