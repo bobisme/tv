@@ -219,6 +219,65 @@ fn run(options: Options, sender: &Sender<CompileMessage>) -> Result<(), String> 
 mod tests {
     use super::*;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use typst::layout::{Frame, FrameItem};
+
+    fn contains_image(frame: &Frame) -> bool {
+        frame.items().any(|(_, item)| match item {
+            FrameItem::Image(..) => true,
+            FrameItem::Group(group) => contains_image(&group.frame),
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn markdown_html_webp_image_compiles_and_is_watched() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("tv-html-test-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(root.join("images")).unwrap();
+        let input = root.join("README.md");
+        fs::write(
+            &input,
+            "# Ward\n\n<p align=\"center\">\n<img src=\"images/ward.webp\" alt=\"Ward\" width=\"400\" />\n</p>\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("images/ward.webp"),
+            include_bytes!("../tests/assets/sample.webp"),
+        )
+        .unwrap();
+        let mut world = LocalWorld::new(&Options {
+            input: input.clone(),
+            root: root.clone(),
+            font_path: None,
+            ppi: 144,
+        })
+        .unwrap();
+        world
+            .refresh_markdown(&Options {
+                input,
+                root: root.clone(),
+                font_path: None,
+                ppi: 144,
+            })
+            .unwrap();
+        let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+        assert!(
+            document
+                .pages()
+                .iter()
+                .any(|page| contains_image(&page.frame))
+        );
+        assert!(
+            world
+                .dependencies()
+                .contains(&root.join("images/ward.webp"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn project_readme_compiles() {

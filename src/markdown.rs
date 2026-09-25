@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use html_parser::{Dom, Element, Node};
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 const PAPER_STYLE: &str = r#"
@@ -132,6 +133,149 @@ fn text(value: &str) -> String {
     format!("#text({})", quoted(value))
 }
 
+fn html_fragment(value: &str) -> Option<String> {
+    let dom = Dom::parse(value).ok()?;
+    Some(dom.children.iter().map(html_node).collect())
+}
+
+fn html_node(node: &Node) -> String {
+    match node {
+        Node::Text(value) => text(value),
+        Node::Comment(_) => String::new(),
+        Node::Element(element) => html_element(element),
+    }
+}
+
+fn html_attribute<'a>(element: &'a Element, name: &str) -> Option<&'a str> {
+    element.attributes.get(name)?.as_deref()
+}
+
+fn html_image_width(value: Option<&str>) -> String {
+    let Some(value) = value.map(str::trim) else {
+        return "100%".into();
+    };
+    if let Some(percent) = value.strip_suffix('%')
+        && let Ok(percent) = percent.trim().parse::<f64>()
+        && percent.is_finite()
+        && percent > 0.0
+    {
+        return format!("{}%", percent.min(100.0));
+    }
+    let pixels = value.strip_suffix("px").unwrap_or(value).trim();
+    if let Ok(pixels) = pixels.parse::<f64>()
+        && pixels.is_finite()
+        && pixels > 0.0
+    {
+        // HTML image dimensions use CSS pixels (96 per inch). The paper's
+        // printable width is just under 448pt, so keep images in the column.
+        return format!("{}pt", (pixels * 0.75).min(440.0));
+    }
+    "100%".into()
+}
+
+fn html_element(element: &Element) -> String {
+    let children = || element.children.iter().map(html_node).collect::<String>();
+    match element.name.to_ascii_lowercase().as_str() {
+        "img" => {
+            let Some(src) = html_attribute(element, "src") else {
+                return String::new();
+            };
+            let alt = html_attribute(element, "alt").unwrap_or("");
+            if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:")
+            {
+                return text(alt);
+            }
+            format!(
+                "#image({}, width: {}, alt: {})",
+                quoted(src),
+                html_image_width(html_attribute(element, "width")),
+                quoted(alt)
+            )
+        }
+        "p" | "div" => {
+            let body = children();
+            let body = match html_attribute(element, "align") {
+                Some("center") => format!("#align(center)[{body}]"),
+                Some("right") => format!("#align(right)[{body}]"),
+                _ => body,
+            };
+            format!("\n{body}\n\n")
+        }
+        "br" => "#linebreak()".into(),
+        "hr" => "\n#line(length: 100%, stroke: 0.5pt)\n".into(),
+        "b" | "strong" => format!("#strong[{}]", children()),
+        "i" | "em" => format!("#emph[{}]", children()),
+        "s" | "del" | "strike" => format!("#strike[{}]", children()),
+        "sup" => format!("#super[{}]", children()),
+        "sub" => format!("#sub[{}]", children()),
+        "a" => match html_attribute(element, "href") {
+            Some(href) if href.starts_with("https://") || href.starts_with("http://") => {
+                format!("#link({})[{}]", quoted(href), children())
+            }
+            _ => children(),
+        },
+        "script" | "style" => String::new(),
+        _ => children(),
+    }
+}
+
+fn inline_html(value: &str, stack: &mut Vec<&'static str>) -> String {
+    let tag = value.trim().to_ascii_lowercase();
+    let (closing, name) =
+        if let Some(name) = tag.strip_prefix("</").and_then(|s| s.strip_suffix('>')) {
+            (true, name)
+        } else if let Some(name) = tag.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+            (false, name)
+        } else {
+            return html_fragment(value).unwrap_or_default();
+        };
+    let tag_name = name
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == '/')
+        .next()
+        .unwrap_or("");
+    if tag_name == "a" {
+        if closing {
+            if stack.last() == Some(&"a") {
+                stack.pop();
+                return "]".into();
+            }
+        } else if let Ok(dom) = Dom::parse(&format!("{value}</a>"))
+            && let Some(Node::Element(element)) = dom.children.first()
+            && let Some(href) = html_attribute(element, "href")
+            && (href.starts_with("https://") || href.starts_with("http://"))
+        {
+            stack.push("a");
+            return format!("#link({})[", quoted(href));
+        }
+        return String::new();
+    }
+    let function = match tag_name {
+        "b" | "strong" => Some("strong"),
+        "i" | "em" => Some("emph"),
+        "s" | "del" | "strike" => Some("strike"),
+        "sup" => Some("super"),
+        "sub" => Some("sub"),
+        _ => None,
+    };
+    if let Some(function) = function {
+        if closing {
+            if stack.last() == Some(&function) {
+                stack.pop();
+                return "]".into();
+            }
+        } else {
+            stack.push(function);
+            return format!("#{function}[");
+        }
+        return String::new();
+    }
+    if closing {
+        String::new()
+    } else {
+        html_fragment(value).unwrap_or_default()
+    }
+}
+
 struct Renderer<'a> {
     events: &'a [Event<'a>],
     pos: usize,
@@ -188,6 +332,7 @@ impl<'a> Renderer<'a> {
 
     fn render_until(&mut self, end: Option<TagEnd>, inline: bool) -> String {
         let mut out = String::new();
+        let mut html_stack = Vec::new();
         while let Some(event) = self.events.get(self.pos) {
             self.pos += 1;
             match event {
@@ -236,7 +381,7 @@ impl<'a> Renderer<'a> {
                             let body = self.render_until(Some(TagEnd::FootnoteDefinition), false);
                             format!("\n#footnote[{body}] {}\n", text(label))
                         }
-                        Tag::HtmlBlock => self.render_until(Some(TagEnd::HtmlBlock), true),
+                        Tag::HtmlBlock => self.html_block(),
                         Tag::MetadataBlock(kind) => {
                             let _ = self.render_until(Some(TagEnd::MetadataBlock(*kind)), true);
                             String::new()
@@ -258,11 +403,30 @@ impl<'a> Renderer<'a> {
                 Event::InlineMath(value) | Event::DisplayMath(value) => {
                     out.push_str(&format!("#raw({})", quoted(value)));
                 }
-                Event::Html(value) | Event::InlineHtml(value) => out.push_str(&text(value)),
+                Event::Html(value) => {
+                    out.push_str(&html_fragment(value).unwrap_or_else(|| text(value)));
+                }
+                Event::InlineHtml(value) => out.push_str(&inline_html(value, &mut html_stack)),
                 Event::FootnoteReference(value) => out.push_str(&text(&format!("[{value}]"))),
             }
         }
+        out.extend(std::iter::repeat_n(']', html_stack.len()));
         out
+    }
+
+    fn html_block(&mut self) -> String {
+        let mut html = String::new();
+        while let Some(event) = self.events.get(self.pos) {
+            self.pos += 1;
+            match event {
+                Event::End(TagEnd::HtmlBlock) => break,
+                Event::Html(value) | Event::InlineHtml(value) | Event::Text(value) => {
+                    html.push_str(value)
+                }
+                _ => {}
+            }
+        }
+        html_fragment(&html).unwrap_or_else(|| text(&html))
     }
 
     fn wrap(&mut self, end: TagEnd, function: &str) -> String {
@@ -421,5 +585,34 @@ mod tests {
         assert!(rendered.contains("columns: (1fr, auto, auto, auto, auto, )"));
         assert!(rendered.contains("#text(\"Development\")#linebreak()#text(\"/160\")"));
         assert!(rendered.contains("table.cell(align: center)"));
+    }
+
+    #[test]
+    fn embedded_html_image_uses_local_asset_and_centered_width() {
+        let source = "# Ward\n\n<p align=\"center\">\n  <img src=\"images/ward.webp\" alt=\"Ward\" width=\"400\" />\n</p>\n\nNext paragraph.\n";
+        let rendered = to_typst(source, Path::new("/tmp/README.md"));
+        assert!(rendered.contains("#align(center)["), "{rendered}");
+        assert!(
+            rendered.contains("#image(\"images/ward.webp\", width: 300pt, alt: \"Ward\")"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("#text(\"<img"), "{rendered}");
+        assert!(rendered.contains("#text(\"Next paragraph.\")"));
+    }
+
+    #[test]
+    fn inline_html_images_and_formatting_render_as_content() {
+        let source = "# Example\n\nA <strong class=\"bold\">bold</strong> word <img src=\"plot.png\" alt=\"Plot\" width=\"50%\"> and a <a href=\"https://example.com\">link</a><br>after.\n";
+        let rendered = to_typst(source, Path::new("/tmp/example.md"));
+        assert!(rendered.contains("#strong[#text(\"bold\")]"), "{rendered}");
+        assert!(
+            rendered.contains("#image(\"plot.png\", width: 50%, alt: \"Plot\")"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("#linebreak()"), "{rendered}");
+        assert!(
+            rendered.contains("#link(\"https://example.com\")[#text(\"link\")]"),
+            "{rendered}"
+        );
     }
 }
